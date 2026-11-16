@@ -1,0 +1,33 @@
+{
+  "data": {
+    "time": "2026-11-16T10:20:00Z",
+    "values": {
+      "altimeterSetting": 1006.5,
+      "cloudBase": 0.35,
+      "cloudCeiling": 10.7,
+      "cloudCover": 87.5,
+      "dewPoint": 2,
+      "freezingRainIntensity": 0,
+      "humidity": 73,
+      "precipitationProbability": 0,
+      "pressureSeaLevel": 1007.37,
+      "pressureSurfaceLevel": 993.26,
+      "rainIntensity": 0,
+      "sleetIntensity": 0,
+      "snowIntensity": 0,
+      "temperature": 5.69,
+      "temperatureApparent": 5.7,
+      "uvHealthConcern": 0,
+      "uvIndex": 1,
+      "visibility": 10,
+      "weatherCode": 1001,
+      "windDirection": 170,
+      "windGust": 5.2,
+      "windSpeed": 2.5
+    }
+  },
+  "location": {
+    "lat": 52.17,
+    "lon": 20.97
+  }
+}

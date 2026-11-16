@@ -1,4 +1,1 @@
-tornado
 requests
-dotenv
-pandas
