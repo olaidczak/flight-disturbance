@@ -24,3 +24,9 @@ variable "enabled_pollers" {
   type    = list(string)
   default = ["noaa_swpc"]
 }
+
+# Tag obrazu seismic_ws w ECR, który uruchamia serwis
+variable "seismic_ws_image_tag" {
+  type    = string
+  default = "latest"
+}

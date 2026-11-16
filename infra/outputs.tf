@@ -24,3 +24,11 @@ output "secret_names" {
     tomorrow_io = aws_secretsmanager_secret.tomorrow_io.name
   }
 }
+
+output "seismic_ws_ecr_url" {
+  value = aws_ecr_repository.seismic_ws.repository_url
+}
+
+output "ecs_cluster_name" {
+  value = aws_ecs_cluster.main.name
+}
