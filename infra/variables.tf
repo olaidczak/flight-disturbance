@@ -22,7 +22,7 @@ variable "log_retention_days" {
 # Dopisuj kolejne, gdy kod danego pollera jest gotowy i sekret ma wartość.
 variable "enabled_pollers" {
   type    = list(string)
-  default = ["noaa_swpc"]
+  default = ["noaa_swpc", "tomorrow_io", "opensky"]
 }
 
 # Tag obrazu seismic_ws w ECR, który uruchamia serwis

@@ -6,7 +6,7 @@ Każdy poller / konsument zamienia dane źródła na `Record`. Reszta systemu
 Źródło        event_time                  location        event_id
 ------------  --------------------------  --------------  ------------------------------------
 opensky       last_contact (idx 4)        lat/lon         opensky:{icao24}:{last_contact}
-tomorrow_io   data.time                   location.lat/lon tomorrow_io:{lat},{lon}:{time}
+tomorrow_io   data.time                   location.lat/lon tomorrow_io:{kod_lotniska}:{time}
 seismic       properties.time             lat/lon/depth   seismic:{unid}:{lastupdate}
 noaa_swpc     time_tag (+Z, to UTC)       None (globalne) noaa_swpc:{wind|mag|kp}:{time_tag}
 """
