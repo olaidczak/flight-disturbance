@@ -1,10 +1,20 @@
 """Poller Tomorrow.io: aktualna pogoda (endpoint realtime) dla wybranych lotnisk.
 
+BRONZE = surowe dane. payload["response"] to cała odpowiedź API bez zmian
+(data.time, data.values, location). Poller dodaje tylko kod lotniska
+(payload["station"]), bo odpowiedź zawiera same współrzędne. Do koperty trafiają:
+event_time = data.time, location = współrzędne z odpowiedzi,
+event_id = tomorrow_io:{lotnisko}:{data.time}.
+
 Limity planu darmowego: 3 zapytania/s, 25/godz., 500/dzień - NA KLUCZ.
 Każde lotnisko to osobne zapytanie, więc obowiązuje wzór:
     liczba_lotnisk * 60 / odstęp_w_minutach  <=  25 * liczba_kluczy
+oraz dziennie: liczba_lotnisk * 1440 / odstęp_w_minutach <= 500 * liczba_kluczy.
 Przy 5 lotniskach i 2 kluczach wystarczy wywołanie co 15 min (20 zapytań/godz., 480/dzień).
 Zapytania rozkładamy na klucze naprzemiennie (lotnisko i -> klucz i % liczba_kluczy).
+
+Duplikaty: jeśli API zwróci ten sam data.time co poprzednio, event_id jest ten sam,
+więc rekord odrzuci SQS FIFO / nadpisze ten sam klucz S3.
 """
 from __future__ import annotations
 
@@ -42,17 +52,16 @@ def fetch(lat: float, lon: float, api_key: str) -> requests.Response:
 
 
 def parse(body: dict, station: str, ingestion_time: str) -> Record:
-    data = body["data"]
+    """Cała odpowiedź API trafia do payloadu bez zmian. Z body czytamy tylko pola koperty."""
+    event_time = to_utc_iso(body["data"]["time"])
     loc = body["location"]
-    event_time = to_utc_iso(data["time"])
-    lat, lon = loc["lat"], loc["lon"]
     return Record(
-        event_id=make_event_id("tomorrow_io", f"{station}", event_time),
+        event_id=make_event_id("tomorrow_io", station, event_time),
         source="tomorrow_io",
         event_time=event_time,
         ingestion_time=ingestion_time,
-        location={"lat": lat, "lon": lon},
-        payload={"station": station, **data["values"]},
+        location={"lat": loc["lat"], "lon": loc["lon"]},
+        payload={"station": station, "response": body},
     )
 
 
