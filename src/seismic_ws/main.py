@@ -1,5 +1,4 @@
 import asyncio
-import hashlib
 import json
 import logging
 import os
@@ -10,27 +9,53 @@ import boto3
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
+from common.schema import Record, make_event_id, now_utc_iso, to_utc_iso
+
 URI = "wss://www.seismicportal.eu/standing_order/websocket"
 PING_INTERVAL = 5
 
-# On Fargate QUEUE_URL comes from the task definition; the default is for local runs.
-# Credentials come from the task role and AWS_REGION is set automatically.
+TOPIC_ARN = os.environ.get("TOPIC_ARN")
 QUEUE_URL = os.environ.get("QUEUE_URL")
 
+sns = boto3.client("sns")
 sqs = boto3.client("sqs")
 
 
+def parse(event: dict, ingestion_time: str | None = None) -> Record:
+    """Convert one EMSC event to the shared record format."""
+    data = event["data"]
+    properties = data["properties"]
+    event_time = to_utc_iso(properties["time"])
+    update_time = to_utc_iso(properties.get("lastupdate", properties["time"]))
+    coordinates = data["geometry"]["coordinates"]
+    return Record(
+        event_id=make_event_id("seismic", properties.get("unid", data["id"]), update_time),
+        source="seismic",
+        event_time=event_time,
+        ingestion_time=ingestion_time or now_utc_iso(),
+        location={"lat": coordinates[1], "lon": coordinates[0], "depth": abs(coordinates[2])},
+        payload={"event": event},
+    )
+
+
 def send_message(event: dict) -> str:
-    """Send the full event JSON to the FIFO queue and return the MessageId."""
-    body = json.dumps(event)
+    """Publish one EMSC event and return its message ID."""
+    record = parse(event)
+    body = record.to_json()
+    if TOPIC_ARN:
+        response = sns.publish(
+            TopicArn=TOPIC_ARN,
+            Message=body,
+            MessageGroupId=record.message_group_id,
+            MessageDeduplicationId=record.deduplication_id,
+        )
+        return response["MessageId"]
+
     response = sqs.send_message(
         QueueUrl=QUEUE_URL,
         MessageBody=body,
-        # Updates of the same earthquake stay in order; different quakes don't block each other.
-        MessageGroupId=event["data"]["id"],
-        # Identical messages (e.g. two tasks overlapping during a deploy) are dropped,
-        # while later updates of the same quake still go through.
-        MessageDeduplicationId=hashlib.sha256(body.encode()).hexdigest(),
+        MessageGroupId=record.message_group_id,
+        MessageDeduplicationId=record.deduplication_id,
     )
     return response["MessageId"]
 

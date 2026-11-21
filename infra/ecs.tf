@@ -82,6 +82,7 @@ resource "aws_ecs_task_definition" "seismic_ws" {
     image     = "${aws_ecr_repository.seismic_ws.repository_url}:${var.seismic_ws_image_tag}"
     essential = true
     environment = [
+      { name = "TOPIC_ARN", value = aws_sns_topic.events.arn },
       { name = "QUEUE_URL", value = aws_sqs_queue.events.url },
     ]
     logConfiguration = {
@@ -101,7 +102,7 @@ resource "aws_ecs_service" "seismic_ws" {
   name            = "seismic-ws"
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.seismic_ws.arn
-  desired_count   = 0 # 1 = działa, 0 = zatrzymany
+  desired_count   = 1
   launch_type     = "FARGATE"
 
   network_configuration {

@@ -20,11 +20,11 @@
 # (zostaje common/ i processing/). boto3 jest w runtime Lambdy.
 
 locals {
-  bronze_archiver_name   = "${var.project}-bronze-archiver"
-  silver_transform_name  = "${var.project}-silver-transform"
-  layers_source_dir      = "${path.module}/../src"
-  layers_log_retention   = 14
-  layers_excluded_dirs   = ["ingestion", "dashboard", "ml", "query_service", "seismic_ws", "__pycache__"]
+  bronze_archiver_name  = "${var.project}-bronze-archiver"
+  silver_transform_name = "${var.project}-silver-transform"
+  layers_source_dir     = "${path.module}/../src"
+  layers_log_retention  = 14
+  layers_excluded_dirs  = ["ingestion", "dashboard", "ml", "query_service", "seismic_ws", "__pycache__"]
 }
 
 data "archive_file" "datalake_layers" {
@@ -59,7 +59,7 @@ data "aws_iam_policy_document" "bronze_archiver" {
   statement {
     sid       = "ReadQueue"
     actions   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"]
-    resources = [aws_sqs_queue.events.arn]
+    resources = [aws_sqs_queue.events.arn, aws_sqs_queue.archive_events.arn]
   }
   statement {
     sid       = "WriteBronze"
@@ -104,6 +104,15 @@ resource "aws_lambda_event_source_mapping" "bronze_archiver_sqs" {
   function_name    = aws_lambda_function.bronze_archiver.arn
   batch_size       = 10
   # archiver zwraca batchItemFailures: ponawiane są tylko wiadomości, które się nie udały
+  function_response_types = ["ReportBatchItemFailures"]
+
+  depends_on = [aws_iam_role_policy.bronze_archiver]
+}
+
+resource "aws_lambda_event_source_mapping" "bronze_archiver_archive_sqs" {
+  event_source_arn        = aws_sqs_queue.archive_events.arn
+  function_name           = aws_lambda_function.bronze_archiver.arn
+  batch_size              = 10
   function_response_types = ["ReportBatchItemFailures"]
 
   depends_on = [aws_iam_role_policy.bronze_archiver]

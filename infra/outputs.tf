@@ -32,3 +32,7 @@ output "seismic_ws_ecr_url" {
 output "ecs_cluster_name" {
   value = aws_ecs_cluster.main.name
 }
+
+output "realtime_table" {
+  value = aws_dynamodb_table.realtime.name
+}

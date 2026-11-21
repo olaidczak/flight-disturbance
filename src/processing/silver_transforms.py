@@ -106,10 +106,26 @@ def _passthrough(rec: Record) -> dict:
     return dict(rec.payload)
 
 
+def _seismic(rec: Record) -> dict:
+    event = rec.payload.get("event")
+    if not event:
+        return dict(rec.payload)
+    data = event["data"]
+    properties = data.get("properties", {})
+    return {
+        "event_id": data.get("id") or properties.get("unid"),
+        "magnitude": properties.get("mag"),
+        "depth": properties.get("depth"),
+        "region": properties.get("flynn_region"),
+        "event_type": properties.get("evtype"),
+    }
+
+
 TRANSFORMS: dict[str, Callable[[Record], dict | None]] = {
     "noaa_swpc": _noaa,
     "opensky": _opensky,
     "tomorrow_io": _tomorrow,
+    "seismic": _seismic,
 }
 
 
