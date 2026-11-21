@@ -276,12 +276,12 @@ resource "aws_cloudwatch_dashboard" "pipeline" {
           region = var.region
           view   = "timeSeries"
           period = 300
-          metrics = flatten([
+          metrics = concat([
             for k in sort(keys(local.monitored_lambdas)) : [
               ["AWS/Lambda", "Invocations", "FunctionName", local.monitored_lambdas[k], { stat = "Sum" }],
               ["AWS/Lambda", "Errors", "FunctionName", local.monitored_lambdas[k], { stat = "Sum" }]
             ]
-          ])
+          ]...)
         }
       },
       {
@@ -295,12 +295,12 @@ resource "aws_cloudwatch_dashboard" "pipeline" {
           region = var.region
           view   = "timeSeries"
           period = 300
-          metrics = flatten([
+          metrics = concat([
             for k in sort(keys(local.monitored_lambdas)) : [
               ["AWS/Lambda", "Duration", "FunctionName", local.monitored_lambdas[k], { stat = "Maximum" }],
               ["AWS/Lambda", "Throttles", "FunctionName", local.monitored_lambdas[k], { stat = "Sum" }]
             ]
-          ])
+          ]...)
         }
       },
       {

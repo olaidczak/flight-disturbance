@@ -107,8 +107,9 @@ def _tomorrow(rec: Record) -> dict:
 
 
 def _seismic(rec: Record) -> dict:
-    props = rec.payload["data"]["properties"]
-    data = {"action": rec.payload.get("action"), **props}
+    payload = rec.payload.get("event", rec.payload)
+    props = payload["data"]["properties"]
+    data = {"action": payload.get("action"), **props}
     data["time"] = _iso_or_none(props.get("time"))
     return data
 

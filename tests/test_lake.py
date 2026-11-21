@@ -292,6 +292,16 @@ def test_seismic_splaszczenie_properties_i_czasy():
     assert d["lastupdate"] == "2026-11-16T19:29:23.33162Z"  # pełna precyzja: porównujemy po niej wersje
 
 
+def test_seismic_stara_koperta_jest_obslugiwana():
+    rec = seismic_record()
+    rec.payload = {"event": rec.payload}
+
+    d = to_silver(rec)["data"]
+
+    assert d["unid"] == "20261115_0000312"
+    assert d["mag"] == 3.2
+
+
 def test_seismic_silver_id_i_klucz_bez_lastupdate():
     """Wyjątek od reguły bronze == silver: silver ma jeden obiekt na trzęsienie (unid)."""
     rec = seismic_record()
