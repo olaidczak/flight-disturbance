@@ -4,14 +4,16 @@ FROM python:3.12-slim
 # Set working directory
 WORKDIR /app
 
-# Copy application files
-COPY requirements.txt .
+# Build context = src/ (main.py imports common/):
+#   docker build -f src/seismic_ws/Dockerfile src
+COPY seismic_ws/requirements.txt .
 
 # Install dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy source code
-COPY main.py .
+COPY common/ common/
+COPY seismic_ws/main.py .
 
 # Run Python application
 CMD ["python", "main.py"]

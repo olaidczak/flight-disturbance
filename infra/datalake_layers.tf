@@ -133,9 +133,15 @@ data "aws_iam_policy_document" "silver_transform" {
     resources = ["${aws_s3_bucket.datalake.arn}/bronze/*"]
   }
   statement {
-    sid       = "WriteSilver"
-    actions   = ["s3:PutObject"]
+    sid       = "ReadWriteSilver"
+    actions   = ["s3:GetObject", "s3:PutObject"] # GetObject: seismic porównuje lastupdate z zapisaną wersją
     resources = ["${aws_s3_bucket.datalake.arn}/silver/*"]
+  }
+  statement {
+    # bez ListBucket brakujący obiekt zwraca 403 zamiast 404 (NoSuchKey) i pierwsza wersja trzęsienia by padała
+    sid       = "ListForNoSuchKey"
+    actions   = ["s3:ListBucket"]
+    resources = [aws_s3_bucket.datalake.arn]
   }
   statement {
     sid       = "FailedEventsToDlq"

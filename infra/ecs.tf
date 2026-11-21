@@ -101,7 +101,7 @@ resource "aws_ecs_service" "seismic_ws" {
   name            = "seismic-ws"
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.seismic_ws.arn
-  desired_count   = 0 # 1 = działa, 0 = zatrzymany
+  desired_count   = 1 # 1 = działa, 0 = zatrzymany
   launch_type     = "FARGATE"
 
   network_configuration {

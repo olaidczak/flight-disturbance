@@ -1,44 +1,35 @@
 import asyncio
-import hashlib
 import json
 import logging
-import os
 import sys
 from collections.abc import AsyncIterator
 
-import boto3
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
+
+from common.schema import Record, make_event_id, now_utc_iso, to_utc_iso
+from common.sqs import publish
 
 URI = "wss://www.seismicportal.eu/standing_order/websocket"
 PING_INTERVAL = 5
 
-# On Fargate QUEUE_URL comes from the task definition; the default is for local runs.
-# Credentials come from the task role and AWS_REGION is set automatically.
-QUEUE_URL = os.environ.get("QUEUE_URL")
 
-sqs = boto3.client("sqs")
-
-
-def send_message(event: dict) -> str:
-    """Send the full event JSON to the FIFO queue and return the MessageId."""
-    body = json.dumps(event)
-    response = sqs.send_message(
-        QueueUrl=QUEUE_URL,
-        MessageBody=body,
-        # Updates of the same earthquake stay in order; different quakes don't block each other.
-        MessageGroupId=event["data"]["id"],
-        # Identical messages (e.g. two tasks overlapping during a deploy) are dropped,
-        # while later updates of the same quake still go through.
-        MessageDeduplicationId=hashlib.sha256(body.encode()).hexdigest(),
+def parse(message: dict, ingestion_time: str) -> Record:
+    """raw seismic message coverted into schema from src/common/schema.py Rzuca KeyError/ValueError, gdy brakuje pól koperty."""
+    props = message["data"]["properties"]
+    return Record(
+        event_id=make_event_id("seismic", props["unid"], props["lastupdate"]),
+        source="seismic",
+        event_time=to_utc_iso(props["time"]),
+        ingestion_time=ingestion_time,
+        location={"lat": props["lat"], "lon": props["lon"], "depth": props["depth"]},
+        payload=message,  # raw message
     )
-    return response["MessageId"]
 
 
 async def stream_events() -> AsyncIterator[dict]:
-    """Yield every message from the EMSC feed as the full parsed JSON dict.
-
-    Reconnects automatically (with backoff) if the connection drops.
+    """get every message from the EMSC feed as the full parsed JSON dict.
+    reconnects automatically (with backoff) if the connection drops.
     """
     async for ws in connect(URI, ping_interval=PING_INTERVAL):
         logging.info("Connected to %s", URI)
@@ -53,15 +44,17 @@ async def stream_events() -> AsyncIterator[dict]:
 
 
 async def main() -> None:
-    async for event in stream_events():
+    async for message in stream_events():
+        try:
+            record = parse(message, now_utc_iso())
+        except (KeyError, TypeError, ValueError):
+            logging.exception(
+                "Skipping message that does not fit the Record envelope: %r", message
+            )
+            continue
         # boto3 is blocking; run it in a thread so websocket pings aren't delayed.
-        message_id = await asyncio.to_thread(send_message, event)
-        logging.info(
-            "Sent %s event %s as message %s",
-            event["action"],
-            event["data"]["id"],
-            message_id,
-        )
+        await asyncio.to_thread(publish, [record])
+        logging.info("Sent %s %s", message.get("action"), record.event_id)
 
 
 if __name__ == "__main__":
