@@ -11,6 +11,7 @@ Dopasuj importy modułów poniżej do struktury repo (np. `from src.pollers impo
 Testy nie wołają prawdziwych API ani AWS: fetch i publish są podmieniane.
 """
 import copy
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -257,3 +258,42 @@ def test_tomorrow_handler_wszystko_pada_rzuca_wyjatek(monkeypatch):
     monkeypatch.setattr(tomorrow_io, "publish", lambda recs: len(recs))
     with pytest.raises(RuntimeError):
         tomorrow_io.lambda_handler()
+
+
+# ------------------------------------------------------------------ seismic (websocket EMSC)
+from pathlib import Path  # noqa: E402
+
+from seismic_ws import main as seismic_ws  # noqa: E402
+
+SEISMIC_MSG = json.loads((Path(__file__).parent / "seismic_sample.json").read_text())
+
+
+def test_seismic_payload_to_cala_wiadomosc_i_koperta():
+    msg = copy.deepcopy(SEISMIC_MSG)
+    rec = seismic_ws.parse(msg, NOW)
+
+    assert msg == SEISMIC_MSG, "parser nie może mutować wejścia"
+    assert rec.payload == SEISMIC_MSG
+    assert rec.event_id == "seismic:20261115_0000312:2026-11-16T19:29:23.33162Z"
+    assert rec.event_time == "2026-11-15T05:08:52Z"
+    assert rec.location == {"lat": 7.5292, "lon": -80.4598, "depth": 15.0}  # depth dodatnia (km)
+    assert Record.from_json(rec.to_json()) == rec
+
+
+def test_seismic_aktualizacja_to_nowy_rekord_a_powtorka_ten_sam():
+    update = copy.deepcopy(SEISMIC_MSG)
+    update["action"] = "update"
+    update["data"]["properties"]["lastupdate"] = "2026-11-16T20:00:00Z"
+
+    first = seismic_ws.parse(SEISMIC_MSG, NOW)
+    again = seismic_ws.parse(SEISMIC_MSG, "2026-11-20T12:05:00Z")
+    updated = seismic_ws.parse(update, NOW)
+
+    assert again.deduplication_id == first.deduplication_id
+    assert updated.deduplication_id != first.deduplication_id
+    assert updated.s3_key_bronze != first.s3_key_bronze
+
+
+def test_seismic_wiadomosc_bez_koperty_rzuca():
+    with pytest.raises(KeyError):
+        seismic_ws.parse({"action": "create", "data": {"properties": {"unid": "x"}}}, NOW)
