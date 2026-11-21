@@ -7,6 +7,7 @@ locals {
     {
       bronze_archiver  = aws_lambda_function.bronze_archiver.function_name
       silver_transform = aws_lambda_function.silver_transform.function_name
+      speed_consumer   = aws_lambda_function.speed_consumer.function_name
     }
   )
 
@@ -123,7 +124,7 @@ resource "aws_cloudwatch_metric_alarm" "sqs_dlq_messages" {
   treat_missing_data  = "notBreaching"
 
   dimensions = {
-    QueueName = aws_sqs_queue.events_dlq.name
+    QueueName = aws_sqs_queue.speed_events_dlq.name
   }
 
   alarm_actions = local.alarm_actions
@@ -143,7 +144,7 @@ resource "aws_cloudwatch_metric_alarm" "sqs_queue_depth" {
   treat_missing_data  = "notBreaching"
 
   dimensions = {
-    QueueName = aws_sqs_queue.events.name
+    QueueName = aws_sqs_queue.speed_events.name
   }
 
   alarm_actions = local.alarm_actions
@@ -163,7 +164,7 @@ resource "aws_cloudwatch_metric_alarm" "sqs_oldest_message_age" {
   treat_missing_data  = "notBreaching"
 
   dimensions = {
-    QueueName = aws_sqs_queue.events.name
+    QueueName = aws_sqs_queue.speed_events.name
   }
 
   alarm_actions = local.alarm_actions
@@ -238,7 +239,7 @@ resource "aws_cloudwatch_dashboard" "pipeline" {
           view   = "timeSeries"
           period = 300
           metrics = [
-            ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", aws_sqs_queue.events.name, { stat = "Maximum" }],
+            ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", aws_sqs_queue.speed_events.name, { stat = "Maximum" }],
             [".", "ApproximateNumberOfMessagesNotVisible", ".", ".", { stat = "Maximum" }],
             [".", "NumberOfMessagesSent", ".", ".", { stat = "Sum" }],
             [".", "NumberOfMessagesDeleted", ".", ".", { stat = "Sum" }]
@@ -257,8 +258,9 @@ resource "aws_cloudwatch_dashboard" "pipeline" {
           view   = "timeSeries"
           period = 300
           metrics = [
-            ["AWS/SQS", "ApproximateAgeOfOldestMessage", "QueueName", aws_sqs_queue.events.name, { stat = "Maximum" }],
-            [".", "ApproximateNumberOfMessagesVisible", "QueueName", aws_sqs_queue.events_dlq.name, { stat = "Maximum" }],
+            ["AWS/SQS", "ApproximateAgeOfOldestMessage", "QueueName", aws_sqs_queue.speed_events.name, { stat = "Maximum" }],
+            [".", "ApproximateNumberOfMessagesVisible", "QueueName", aws_sqs_queue.speed_events_dlq.name, { stat = "Maximum" }],
+            [".", "ApproximateNumberOfMessagesVisible", "QueueName", aws_sqs_queue.archive_events_dlq.name, { stat = "Maximum" }],
             [".", "ApproximateNumberOfMessagesVisible", "QueueName", aws_sqs_queue.silver_transform_dlq.name, { stat = "Maximum" }]
           ]
         }
@@ -274,12 +276,12 @@ resource "aws_cloudwatch_dashboard" "pipeline" {
           region = var.region
           view   = "timeSeries"
           period = 300
-          metrics = flatten([
+          metrics = concat([
             for k in sort(keys(local.monitored_lambdas)) : [
               ["AWS/Lambda", "Invocations", "FunctionName", local.monitored_lambdas[k], { stat = "Sum" }],
               ["AWS/Lambda", "Errors", "FunctionName", local.monitored_lambdas[k], { stat = "Sum" }]
             ]
-          ])
+          ]...)
         }
       },
       {
@@ -293,12 +295,12 @@ resource "aws_cloudwatch_dashboard" "pipeline" {
           region = var.region
           view   = "timeSeries"
           period = 300
-          metrics = flatten([
+          metrics = concat([
             for k in sort(keys(local.monitored_lambdas)) : [
               ["AWS/Lambda", "Duration", "FunctionName", local.monitored_lambdas[k], { stat = "Maximum" }],
               ["AWS/Lambda", "Throttles", "FunctionName", local.monitored_lambdas[k], { stat = "Sum" }]
             ]
-          ])
+          ]...)
         }
       },
       {

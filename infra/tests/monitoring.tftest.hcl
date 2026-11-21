@@ -25,8 +25,8 @@ run "default_monitoring_within_free_tier" {
   command = plan
 
   assert {
-    condition     = local.total_alarm_count == 9 && local.total_alarm_count <= 10
-    error_message = "Default configuration must create 9 alarms (<= 10 within AWS Free Tier)."
+    condition     = local.total_alarm_count == 10 && local.total_alarm_count <= 10
+    error_message = "Default configuration must create 10 alarms (<= 10 within AWS Free Tier)."
   }
 
   assert {

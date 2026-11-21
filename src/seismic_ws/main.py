@@ -13,9 +13,8 @@ from common.sqs import publish
 URI = "wss://www.seismicportal.eu/standing_order/websocket"
 PING_INTERVAL = 5
 
-
 def parse(message: dict, ingestion_time: str) -> Record:
-    """raw seismic message coverted into schema from src/common/schema.py Rzuca KeyError/ValueError, gdy brakuje pól koperty."""
+    """Convert one EMSC message to the shared record format."""
     props = message["data"]["properties"]
     return Record(
         event_id=make_event_id("seismic", props["unid"], props["lastupdate"]),
@@ -23,7 +22,7 @@ def parse(message: dict, ingestion_time: str) -> Record:
         event_time=to_utc_iso(props["time"]),
         ingestion_time=ingestion_time,
         location={"lat": props["lat"], "lon": props["lon"], "depth": props["depth"]},
-        payload=message,  # raw message
+        payload=message,
     )
 
 

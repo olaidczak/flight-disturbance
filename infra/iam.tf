@@ -22,6 +22,11 @@ resource "aws_iam_role_policy_attachment" "lambda_logs" {
 
 data "aws_iam_policy_document" "lambda_access" {
   statement {
+    sid       = "PublishEvents"
+    actions   = ["sns:Publish"]
+    resources = [aws_sns_topic.events.arn]
+  }
+  statement {
     sid       = "SendToQueue"
     actions   = ["sqs:SendMessage"]
     resources = [aws_sqs_queue.events.arn]
@@ -111,6 +116,11 @@ resource "aws_iam_role" "seismic_ws_task" {
 }
 
 data "aws_iam_policy_document" "seismic_ws_task" {
+  statement {
+    sid       = "PublishEvents"
+    actions   = ["sns:Publish"]
+    resources = [aws_sns_topic.events.arn]
+  }
   statement {
     sid       = "SendToQueue"
     actions   = ["sqs:SendMessage"]
