@@ -95,7 +95,10 @@ class Record:
         day = self.event_time[:10]
         safe_id = re.sub(r"[^A-Za-z0-9._=-]", "_", self.event_id)
         return f"bronze/source={self.source}/date={day}/{safe_id}.json"
-
+    @property
+    def s3_key_silver(self) -> str:
+        # ten sam układ co bronze, inny prefiks: silver jest wyliczalny z bronze 1:1
+        return "silver/" + self.s3_key_bronze[len("bronze/"):]
 
 # ------------------------------------------------------ pomocnicze budowanie id
 def make_event_id(source: str, *parts: Any) -> str:
