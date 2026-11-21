@@ -35,7 +35,12 @@ def light_features(source: str, data: dict) -> dict:
             "bt", "bx_gsm", "by_gsm", "bz_gsm",
         ])
     if source == "seismic":
-        return _pick(data, ["magnitude", "depth", "region", "event_type"])
+        return {
+            "magnitude": data.get("mag"),
+            "depth": data.get("depth"),
+            "region": data.get("flynn_region"),
+            "event_type": data.get("evtype"),
+        }
     return {}
 
 

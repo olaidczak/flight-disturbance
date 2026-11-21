@@ -1,9 +1,9 @@
 # Kolejka martwych wiadomości (dla FIFO też musi być FIFO)
 resource "aws_sqs_queue" "events_dlq" {
-  name                       = "${var.project}-events-dlq.fifo"
-  fifo_queue                 = true
-  message_retention_seconds  = 1209600 # 14 dni
-  sqs_managed_sse_enabled    = true
+  name                      = "${var.project}-events-dlq.fifo"
+  fifo_queue                = true
+  message_retention_seconds = 1209600 # 14 dni
+  sqs_managed_sse_enabled   = true
 }
 
 # Główna kolejka zdarzeń. Deduplication id podajemy sami (Record.deduplication_id),

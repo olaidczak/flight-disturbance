@@ -2,7 +2,7 @@
 # żeby klucze nie trafiły do kodu ani do tfstate.
 resource "aws_secretsmanager_secret" "opensky" {
   name                    = "${var.project}/opensky" # JSON: {"client_id": "...", "client_secret": "..."}
-  recovery_window_in_days = 0                         # projekt studencki: kasowanie od razu
+  recovery_window_in_days = 0                        # projekt studencki: kasowanie od razu
 }
 
 resource "aws_secretsmanager_secret" "tomorrow_io" {

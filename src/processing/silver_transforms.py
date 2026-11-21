@@ -10,7 +10,11 @@ gdy rekord ma zostać pominięty. To jedyne miejsce, w którym zmieniamy dane ź
 - OpenSky: nazwane pola z tablicy stanu, callsign bez spacji (puste => None),
   czasy epoch => ISO UTC, odrzucone `sensors` (szum).
 - Tomorrow.io: spłaszczenie response.data.values do snake_case + kod lotniska.
-- Inne źródła (np. seismic): payload bez zmian, dopóki nie dopiszecie transformacji.
+- Seismic: `action` + spłaszczone data.properties, `time` => ISO UTC. `lastupdate`
+  zostaje z pełną precyzją: silver_handler porównuje po nim wersje tego samego
+  trzęsienia (`unid`), a wersje potrafią przyjść w odstępie poniżej sekundy.
+  Silver event_id = seismic:{unid} (różny od bronze, patrz common/schema.py).
+- Inne źródła: payload bez zmian, dopóki nie dopiszecie transformacji.
 
 Dokument silver ma kopertę rekordu + `data` (oczyszczone pola) + `silver_version`.
 """
@@ -102,23 +106,15 @@ def _tomorrow(rec: Record) -> dict:
     return data
 
 
+def _seismic(rec: Record) -> dict:
+    props = rec.payload["data"]["properties"]
+    data = {"action": rec.payload.get("action"), **props}
+    data["time"] = _iso_or_none(props.get("time"))
+    return data
+
+
 def _passthrough(rec: Record) -> dict:
     return dict(rec.payload)
-
-
-def _seismic(rec: Record) -> dict:
-    event = rec.payload.get("event")
-    if not event:
-        return dict(rec.payload)
-    data = event["data"]
-    properties = data.get("properties", {})
-    return {
-        "event_id": data.get("id") or properties.get("unid"),
-        "magnitude": properties.get("mag"),
-        "depth": properties.get("depth"),
-        "region": properties.get("flynn_region"),
-        "event_type": properties.get("evtype"),
-    }
 
 
 TRANSFORMS: dict[str, Callable[[Record], dict | None]] = {
@@ -135,7 +131,7 @@ def to_silver(rec: Record) -> dict | None:
     if data is None:
         return None
     return {
-        "event_id": rec.event_id,
+        "event_id": rec.silver_event_id,
         "source": rec.source,
         "event_time": rec.event_time,
         "ingestion_time": rec.ingestion_time,

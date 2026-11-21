@@ -9,6 +9,12 @@ opensky       last_contact (idx 4)        lat/lon         opensky:{icao24}:{last
 tomorrow_io   data.time                   location.lat/lon tomorrow_io:{kod_lotniska}:{time}
 seismic       properties.time             lat/lon/depth   seismic:{unid}:{lastupdate}
 noaa_swpc     time_tag (+Z, to UTC)       None (globalne) noaa_swpc:{wind|mag|kp}:{time_tag}
+
+Wyjątek bronze != silver (seismic): bronze trzyma każdą wersję trzęsienia
+(event_id = seismic:{unid}:{lastupdate}), a silver jeden obiekt na trzęsienie
+z najnowszą wersją (silver event_id = seismic:{unid}, wygrywa najnowszy lastupdate).
+Dla seismic event_id i klucz S3 w silver NIE są takie same jak w bronze.
+Dla pozostałych źródeł silver_event_id == event_id i klucze różnią się tylko prefiksem.
 """
 from __future__ import annotations
 
@@ -96,9 +102,18 @@ class Record:
         safe_id = re.sub(r"[^A-Za-z0-9._=-]", "_", self.event_id)
         return f"bronze/source={self.source}/date={day}/{safe_id}.json"
     @property
+    def silver_event_id(self) -> str:
+        # seismic: kolejne wersje (lastupdate) tego samego trzęsienia => jeden rekord silver
+        if self.source == "seismic":
+            return ":".join(self.event_id.split(":")[:2])  # seismic:{unid}
+        return self.event_id
+
+    @property
     def s3_key_silver(self) -> str:
-        # ten sam układ co bronze, inny prefiks: silver jest wyliczalny z bronze 1:1
-        return "silver/" + self.s3_key_bronze[len("bronze/"):]
+        # ten sam układ co bronze, inny prefiks; dla seismic klucz z silver_event_id (bez lastupdate)
+        day = self.event_time[:10]
+        safe_id = re.sub(r"[^A-Za-z0-9._=-]", "_", self.silver_event_id)
+        return f"silver/source={self.source}/date={day}/{safe_id}.json"
 
 # ------------------------------------------------------ pomocnicze budowanie id
 def make_event_id(source: str, *parts: Any) -> str:

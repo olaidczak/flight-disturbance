@@ -44,7 +44,7 @@ def _key(record: Record, data: dict) -> str:
     if record.source == "noaa_swpc":
         return f"noaa#{data['series']}"
     if record.source == "seismic":
-        return f"seismic#{data['event_id']}"
+        return f"seismic#{data['unid']}"
     raise ValueError(f"Unsupported source: {record.source}")
 
 
@@ -91,12 +91,14 @@ def process(body: str | bytes) -> str:
     data = transformed["data"]
     features = light_features(record.source, data)
     context = _context(record, features)
+    version_time = data.get("lastupdate", record.event_time) if record.source == "seismic" else record.event_time
     item = _decimal({
         "entity_id": _key(record, data),
         "record_type": "LATEST",
         "source": record.source,
         "event_id": record.event_id,
         "event_time": record.event_time,
+        "version_time": version_time,
         "updated_at": now_utc_iso(),
         "expires_at": int(time.time()) + int(os.environ.get("TTL_HOURS", "24")) * 3600,
         "location": record.location,
@@ -112,7 +114,7 @@ def process(body: str | bytes) -> str:
 
         table.put_item(
             Item=item,
-            ConditionExpression=Attr("event_time").not_exists() | Attr("event_time").lte(record.event_time),
+            ConditionExpression=Attr("version_time").not_exists() | Attr("version_time").lte(version_time),
         )
     except table.meta.client.exceptions.ConditionalCheckFailedException:
         return "stale"
