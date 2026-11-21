@@ -13,19 +13,24 @@ A near-real-time analytics platform for aviation operations analysts. It correla
 ## 2. Target Architecture & Environment Constraints (AWS Lambda Architecture)
 
 - **Environment & Stack**: AWS Region **`eu-north-1`** (Stockholm — overrides any `eu-central-1` plugin defaults), Python **`3.12`**, Terraform **`>= 1.10`** (`hashicorp/aws >= 5.0`, remote state in `s3://flight-disruption-tfstate-592964949672`).
-- **Lambda Packaging Rule**: Pollers (`src/ingestion/`) are packaged via `scripts/build_lambda.sh` (`build/lambda.zip`, includes `requirements.txt`). Processing Lambdas (`src/processing/`) are zipped directly from source via `archive_file` in `infra/datalake_layers.tf` (`build/datalake_layers.zip`) and **must use only the Python standard library + built-in `boto3`** (no `pandas`/`numpy` unless a custom layer or container image is introduced).
+- **Lambda Packaging Rule**: Pollers (`src/ingestion/`) and Speed Layer (`src/speed/`) are packaged via `scripts/build_lambda.sh` (`build/lambda.zip`, includes `requirements.txt`). Data Lake Lambdas (`src/processing/`) are zipped directly from source via `archive_file` in `infra/datalake_layers.tf` (`build/datalake_layers.zip`) and **must use only the Python standard library + built-in `boto3`** (no `pandas`/`numpy` unless a custom layer or container image is introduced).
 - **Ingestion (`src/ingestion/`, `src/seismic_ws/`)**:
   - EventBridge Scheduler triggers REST polling Lambda functions (`opensky`, `tomorrow_io`, `noaa_swpc`).
-  - ECS Fargate runs a persistent WebSocket client (`seismic_ws` -> SeismicPortal EMSC).
-- **Buffering (`infra/sqs.tf`)**:
-  - Amazon SQS FIFO (`flight-disruption-events.fifo`) + Dead-Letter Queue (`flight-disruption-events-dlq.fifo`).
+  - ECS Fargate runs a persistent WebSocket client (`seismic_ws` -> SeismicPortal EMSC), wrapping events into `Record` and publishing via `common.sqs.publish()`.
+- **Buffering & Fan-Out (`infra/speed_layer.tf`, `infra/sqs.tf`)**:
+  - Amazon SNS FIFO (`flight-disruption-events.fifo`) fans out raw messages (`raw_message_delivery = true`) to two SQS FIFO queues with dedicated Dead-Letter Queues (`maxReceiveCount = 5`):
+    - `flight-disruption-archive-events.fifo` (+ `archive-events-dlq.fifo`) for the Batch/Bronze path,
+    - `flight-disruption-speed-events.fifo` (+ `speed-events-dlq.fifo`) for the Speed Layer path.
+  - Legacy queue `flight-disruption-events.fifo` remains wired to `bronze_archiver` as a migration fallback.
   - Every event carries a deterministic `event_id`, `MessageGroupId` (`Record.message_group_id`), and `MessageDeduplicationId` (SHA-256 of `event_id`).
-- **Speed Layer & Data Lake (`src/processing/`, `infra/datalake_layers.tf`, `infra/s3.tf`)**:
+- **Batch Layer & Data Lake (`src/processing/`, `infra/datalake_layers.tf`, `infra/s3.tf`)**:
   - **Bronze (`archiver.py`)**: Lambda `bronze_archiver` consumes SQS FIFO batches (`ReportBatchItemFailures`), validates the `Record` envelope, and writes immutable raw JSON objects to `s3://<bucket>/bronze/source=<source>/date=<YYYY-MM-DD>/<safe_id>.json` using conditional writes (`If-None-Match: *`).
-  - **Silver (`silver_handler.py`, `silver_transforms.py`)**: S3 `ObjectCreated` events on prefix `bronze/` trigger Lambda `silver_transform`, which cleans, filters (e.g., drops inactive NOAA satellites), normalizes field names/types, and writes cleaned documents to `s3://<bucket>/silver/source=<source>/date=<YYYY-MM-DD>/<safe_id>.json` (with a dedicated DLQ for failed async invocations).
+  - **Silver (`silver_handler.py`, `silver_transforms.py`)**: S3 `ObjectCreated` events on prefix `bronze/` trigger Lambda `silver_transform`, which cleans, filters (e.g., drops inactive NOAA satellites), normalizes field names/types, and writes cleaned documents to `s3://<bucket>/silver/source=<source>/date=<YYYY-MM-DD>/<safe_silver_id>.json` (with a dedicated DLQ). Exception for `seismic`: `LATEST_WINS` (`silver_event_id = seismic:{unid}`) keeps only the newest `lastupdate` via optimistic `ETag` (`If-Match`) conditional writes.
   - **Gold / Batch Layer (upcoming)**: joined spatiotemporal features, labels, and aggregations (Glue / EMR Serverless / Lambda).
-- **Replay**: A custom producer reads archived raw events from S3 (`bronze/`) and republishes them to SQS FIFO preserving original `event_time` timestamps.
-- **Operational Monitoring (`infra/monitoring.tf`)**: CloudWatch Alarms (queue depth, oldest message age, DLQ activity, per-Lambda errors, `seismic_ws` log errors), a consolidated CloudWatch Dashboard (`flight-disruption-pipeline`), and optional SNS email alerts.
+- **Speed Layer (`src/speed/`, `infra/speed_layer.tf`)**:
+  - Lambda `speed_consumer` consumes `flight-disruption-speed-events.fifo` (`ReportBatchItemFailures`), applies `to_silver()`, computes deterministic `light_features()`, enriches live `opensky` flights with nearest Polish airport weather (`EPWA`, `EPKK`, `EPGD`, `EPWR`, `EPPO`) and latest NOAA space weather (`weather_stale`, `noaa_stale`, `missing_features`), and upserts `LATEST` items into DynamoDB (`flight-disruption-realtime`, `PAY_PER_REQUEST`, 24h TTL, conditional `version_time`).
+- **Replay (planned)**: A custom producer reads archived raw events from S3 (`bronze/`) and republishes them preserving original `event_time` timestamps.
+- **Operational Monitoring (`infra/monitoring.tf`)**: **10/10** CloudWatch Alarms within AWS Free Tier (3 SQS alarms on `speed_events`/`speed_events_dlq`, 6 per-Lambda error alarms including `speed_consumer`, 1 `seismic_ws` log error alarm), a consolidated 7-widget CloudWatch Dashboard (`flight-disruption-pipeline`, also displaying `archive_events_dlq` and `silver_transform_dlq`), and optional SNS email alerts.
 - **Serving (later stages)**: Step Functions + SageMaker, DynamoDB (real-time views), Athena / custom query service on EC2, API Gateway + Lambda, Streamlit on ECS Fargate.
 
 ---

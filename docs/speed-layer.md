@@ -1,0 +1,23 @@
+# Module: Speed Layer Consumer & Real-Time Feature Store (`src/speed/`, `infra/speed_layer.tf`)
+
+## 1. Objective, Inputs & Outputs
+Consumes near-real-time event batches from the SQS FIFO speed queue (`flight-disruption-speed-events.fifo`), applies shared Bronze -> Silver cleaning (`processing.silver_transforms.to_silver`), extracts deterministic lightweight features, enriches live flights with nearest-airport weather and space-weather context, and upserts the latest entity state into Amazon DynamoDB ([AGENTS.md](../AGENTS.md)).
+
+- **Inputs**: SQS FIFO batches (`batch_size = 10`, `ReportBatchItemFailures`) fanned out from SNS FIFO (`flight-disruption-events.fifo`) carrying `Record` JSON envelopes from all 4 sources (`opensky`, `tomorrow_io`, `noaa_swpc`, `seismic`).
+- **Outputs**: DynamoDB `LATEST` items in `flight-disruption-realtime` (`entity_id` PK = `flight#<icao24>` / `weather#<station>` / `noaa#<series>` / `seismic#<unid>`, `record_type` SK = `LATEST`), with 24h TTL (`expires_at`), `Decimal`-encoded numeric features, and conditional `version_time` upserts preventing stale overwrites.
+- **Rate Limits & Cost Boundaries (AWS Free Tier)**: DynamoDB `PAY_PER_REQUEST` (within 25 GB / on-demand low volume), Lambda 256 MB / 30s timeout, dedicated DLQ (`flight-disruption-speed-events-dlq.fifo`), and 10/10 CloudWatch alarms within Free Tier.
+
+## 2. Files Created / Modified
+- `src/speed/features.py` – deterministic per-source `light_features()`, Haversine `nearest_station()` (5 Polish airports), and `age_minutes()`.
+- `src/speed/handler.py` – SQS FIFO `lambda_handler` with `ReportBatchItemFailures`, nearest weather + NOAA context join (`weather_stale`, `noaa_stale`, `missing_features`), and optimistic `version_time` DynamoDB writes.
+- `infra/speed_layer.tf` – SNS FIFO topic (`events.fifo`), `archive_events` & `speed_events` SQS FIFO queues + DLQs, DynamoDB `realtime` table, IAM role, and `speed_consumer` Lambda.
+- `tests/test_speed.py` – offline unit tests covering feature extraction, spatial/temporal joins, staleness detection, Decimal conversion, out-of-order rejection, and FIFO partial batch failure isolation.
+
+## 3. Test Documentation Table (Milestone 2 Report)
+
+| Test ID | Objective | Steps | Expected Result | Actual Result (Evidence) |
+|---|---|---|---|---|
+| **T-SPD-01** | Verify per-source lightweight feature extraction, Haversine nearest-station lookup, and elapsed-time calculation (offline) | Run `PYTHONPATH=src pytest -q tests/test_speed.py -k "light_features or nearest_station or age_minutes"` | Correct feature subsets extracted for all 4 sources; Warsaw/Krakow coordinates map to `EPWA`/`EPKK`; negative age clamped to `0.0`; `None` handled safely. | 3/3 passed (`test_light_features_extracts_per_source_fields`, `test_nearest_station_selects_closest_airport_and_handles_none`, `test_age_minutes_computes_elapsed_time_and_clamps_negative`). |
+| **T-SPD-02** | Verify DynamoDB `Decimal` serialization, nearest-weather & NOAA context enrichment, and staleness/missing-feature flags (offline) | Run `PYTHONPATH=src pytest -q tests/test_speed.py -k "decimal or enriches or stale_and_missing"` | No raw `float` values stored; flights near Warsaw attach `EPWA` weather + NOAA context with `weather_stale = False`; outdated weather (>30 min) and missing NOAA populate `weather_stale = True`, `noaa_stale = True`, and `missing_features`. | 3/3 passed (`test_process_writes_weather_noaa_seismic_with_decimal_types`, `test_process_opensky_enriches_flight_with_fresh_weather_and_noaa_context`, `test_process_opensky_marks_stale_and_missing_context`). |
+| **T-SPD-03** | Verify inactive NOAA satellite filtering, out-of-order seismic rejection (`stale`), and FIFO partial batch failure isolation (offline) | Run `PYTHONPATH=src pytest -q tests/test_speed.py -k "inactive or out_of_order or partial_batch"` | Inactive NOAA rows return `skipped`; older seismic `lastupdate` returns `stale` without overwriting newer magnitude; malformed JSON blocks only subsequent messages in the same FIFO `MessageGroupId` while other groups succeed. | 3/3 passed (`test_process_skips_inactive_noaa_satellite`, `test_process_rejects_out_of_order_stale_seismic_update`, `test_lambda_handler_partial_batch_failure_isolates_failed_fifo_group`). |
+| **T-SPD-04** | Live end-to-end verification on AWS (`eu-north-1`) | After `terraform apply`, inspect CloudWatch Logs for `/aws/lambda/flight-disruption-speed-consumer` and query items in DynamoDB table `flight-disruption-realtime` | `flight#<icao24>` items appear in DynamoDB with populated `features`, `nearest_weather_station`, and `context`; `flight-disruption-speed-events-dlq.fifo` has 0 messages. | *(paste DynamoDB item JSON / CloudWatch log snippet)* |
