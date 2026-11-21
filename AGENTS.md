@@ -10,8 +10,10 @@ A near-real-time analytics platform for aviation operations analysts. It correla
 
 ---
 
-## 2. Target Architecture (AWS Lambda Architecture)
+## 2. Target Architecture & Environment Constraints (AWS Lambda Architecture)
 
+- **Environment & Stack**: AWS Region **`eu-north-1`** (Stockholm — overrides any `eu-central-1` plugin defaults), Python **`3.12`**, Terraform **`>= 1.10`** (`hashicorp/aws >= 5.0`, remote state in `s3://flight-disruption-tfstate-592964949672`).
+- **Lambda Packaging Rule**: Pollers (`src/ingestion/`) are packaged via `scripts/build_lambda.sh` (`build/lambda.zip`, includes `requirements.txt`). Processing Lambdas (`src/processing/`) are zipped directly from source via `archive_file` in `infra/datalake_layers.tf` (`build/datalake_layers.zip`) and **must use only the Python standard library + built-in `boto3`** (no `pandas`/`numpy` unless a custom layer or container image is introduced).
 - **Ingestion (`src/ingestion/`, `src/seismic_ws/`)**:
   - EventBridge Scheduler triggers REST polling Lambda functions (`opensky`, `tomorrow_io`, `noaa_swpc`).
   - ECS Fargate runs a persistent WebSocket client (`seismic_ws` -> SeismicPortal EMSC).
