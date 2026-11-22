@@ -64,6 +64,9 @@ def main() -> int:
     args = ap.parse_args()
 
     check_env()
+    # Poller czyta sekret z SECRET_NAME (tak ustawia go Terraform dla Lambdy).
+    if args.poller == "opensky" and os.environ.get("OPENSKY_SECRET_ARN"):
+        os.environ.setdefault("SECRET_NAME", os.environ["OPENSKY_SECRET_ARN"])
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     poller = load_poller(args.poller)
 
