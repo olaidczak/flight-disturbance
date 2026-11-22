@@ -4,6 +4,9 @@
 # Każdą zmienną można nadpisać wcześniej, np. AWS_REGION=eu-central-1 bash scripts/run_poller_local.sh ...
 set -euo pipefail
 
+# shellcheck disable=SC1091
+source "$(dirname "$0")/../.venv/bin/activate"
+
 export AWS_REGION="${AWS_REGION:-eu-north-1}"
 export QUEUE_URL="${QUEUE_URL:-https://sqs.eu-north-1.amazonaws.com/592964949672/flight-disruption-events.fifo}"
 export OPENSKY_SECRET_ARN="${OPENSKY_SECRET_ARN:-flight-disruption/opensky}"  # nazwa sekretu też działa
