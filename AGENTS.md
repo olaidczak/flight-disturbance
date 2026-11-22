@@ -4,9 +4,10 @@
 
 ---
 
-## 1. Project Goal
+## 1. Project Goal & Team
 
-A near-real-time analytics platform for aviation operations analysts. It correlates live aircraft state vectors with weather, seismic, and space-weather events to detect air traffic disruptions, estimate short-term disruption risk, and explain primary contributing factors based on spatiotemporal correlation (event time + geographic proximity). Current phase (**Project Milestone 2**): data ingestion, preprocessing (`bronze` -> `silver`), and operational monitoring.
+- **Team Name**: **Igory**.
+- **Goal**: A near-real-time analytics platform for aviation operations analysts. It correlates live aircraft state vectors with weather, seismic, and space-weather events to detect air traffic disruptions, estimate short-term disruption risk, and explain primary contributing factors based on spatiotemporal correlation (event time + geographic proximity). Current phase (**Project Milestone 2**): data ingestion, preprocessing (`bronze` -> `silver`), and operational monitoring.
 
 ---
 

@@ -1,9 +1,9 @@
-"""Testy warstwy lake: archiver (bronze), silver_transforms, silver_handler
-oraz przepływ end-to-end: pollery -> archiver -> silver (na atrapie S3).
+"""Unit tests for Data Lake layers: archiver (Bronze), silver_transforms, silver_handler,
+and end-to-end flow: pollers -> archiver -> silver (using an in-memory FakeS3 stub).
 
-Uruchomienie z korzenia repo (dopasuj ścieżki do swojej struktury):
-    PYTHONPATH=src:src/ingestion pytest -q tests/test_lake.py
-Testy nie wołają AWS ani prawdziwych API.
+Run from repository root:
+    PYTHONPATH=src pytest -q tests/test_lake.py
+Tests do not call AWS or live external APIs.
 """
 import copy
 import dataclasses
@@ -23,10 +23,9 @@ from processing.silver_transforms import OPENSKY_FIELDS, to_silver
 from seismic_ws import main as seismic_ws
 
 
-
 def _load_poller(name):
-    """Znajduje moduł pollera niezależnie od układu katalogów (src/ingestion, src/ingestion/pollers
-    albo płasko na PYTHONPATH). Brakującą zależność w środku modułu (np. requests) zgłasza normalnie."""
+    """Locate a poller module regardless of package layout (src/ingestion, src/ingestion/pollers,
+    or flat on PYTHONPATH). Missing internal dependencies (e.g., requests) are raised normally."""
     tried = []
     for pkg in ("ingestion", "ingestion.pollers", "pollers", ""):
         mod = f"{pkg}.{name}" if pkg else name
@@ -35,9 +34,9 @@ def _load_poller(name):
             return importlib.import_module(mod)
         except ModuleNotFoundError as e:
             if e.name and (mod == e.name or mod.startswith(e.name + ".")):
-                continue  # to nie ten układ katalogów
+                continue  # not this package layout
             raise
-    raise ImportError(f"Nie znaleziono pollera '{name}'. Próbowano: {', '.join(tried)}")
+    raise ImportError(f"Poller '{name}' not found. Tried: {', '.join(tried)}")
 
 
 noaa_swpc = _load_poller("noaa_swpc")
@@ -48,7 +47,7 @@ BUCKET = "lake-test"
 NOW = "2026-11-20T12:00:00Z"
 
 
-# ------------------------------------------------------------------- atrapa S3
+# ------------------------------------------------------------------- S3 stub
 class PreconditionFailed(Exception):
     response = {"Error": {"Code": "PreconditionFailed"}}
 
@@ -103,7 +102,7 @@ def s3(monkeypatch):
     return fake
 
 
-# ------------------------------------------------------------------ pomocnicze
+# ------------------------------------------------------------------ helpers
 def sqs_event(records, bodies=None):
     msgs = []
     for i, r in enumerate(records):
@@ -146,7 +145,7 @@ def opensky_record(state=None, snapshot=1794824060):
 
 
 # =========================================================== archiver (bronze)
-def test_archiver_zapisuje_rekord_bez_zmian_pod_kluczem_bronze(s3):
+def test_archiver_writes_record_unchanged_under_bronze_key(s3):
     rec = opensky_record()
     out = archiver.lambda_handler(sqs_event([rec]))
 
@@ -155,21 +154,21 @@ def test_archiver_zapisuje_rekord_bez_zmian_pod_kluczem_bronze(s3):
     assert s3.keys()[0].startswith("bronze/source=opensky/date=")
     stored = Record.from_json(s3.objects[(BUCKET, rec.s3_key_bronze)])
     assert stored == rec
-    assert stored.payload["state"][1] == "LOT123  "  # callsign nietknięty
+    assert stored.payload["state"][1] == "LOT123  "  # callsign untouched
 
 
-def test_archiver_duplikat_pierwszy_zapis_wygrywa(s3):
+def test_archiver_duplicate_first_write_wins(s3):
     first = opensky_record()
     second = dataclasses.replace(first, ingestion_time="2026-11-20T12:05:00Z")
 
     assert archiver.lambda_handler(sqs_event([first])) == {"batchItemFailures": []}
-    assert archiver.lambda_handler(sqs_event([second])) == {"batchItemFailures": []}  # 412 = sukces
+    assert archiver.lambda_handler(sqs_event([second])) == {"batchItemFailures": []}  # 412 = success
 
     assert len(s3.keys()) == 1
-    assert s3.doc(first.s3_key_bronze)["ingestion_time"] == NOW  # zostaje czas pierwszego pobrania
+    assert s3.doc(first.s3_key_bronze)["ingestion_time"] == NOW  # preserves first ingestion_time
 
 
-def test_archiver_write_once_wylaczony_nadpisuje(s3, monkeypatch):
+def test_archiver_write_once_disabled_overwrites(s3, monkeypatch):
     monkeypatch.setenv("BRONZE_WRITE_ONCE", "false")
     first = opensky_record()
     second = dataclasses.replace(first, ingestion_time="2026-11-20T12:05:00Z")
@@ -180,29 +179,29 @@ def test_archiver_write_once_wylaczony_nadpisuje(s3, monkeypatch):
     assert s3.doc(first.s3_key_bronze)["ingestion_time"] == "2026-11-20T12:05:00Z"
 
 
-def test_archiver_blad_wiadomosci_blokuje_ta_sama_grupe_ale_nie_inne(s3):
+def test_archiver_message_error_blocks_same_group_only(s3):
     ok1 = opensky_record()
     bad = opensky_record()
     later_same_group = opensky_record(state=["abc123"] + STATE[1:])
     other_group = noaa_swpc.parse_kp([{"time_tag": "2026-11-20T09:00:00", "Kp": 3.0}], NOW)[0]
 
-    event = sqs_event([ok1, bad, later_same_group, other_group], bodies=[None, "to nie jest json", None, None])
+    event = sqs_event([ok1, bad, later_same_group, other_group], bodies=[None, "not valid json", None, None])
     out = archiver.lambda_handler(event)
 
     assert out["batchItemFailures"] == [{"itemIdentifier": "m1"}, {"itemIdentifier": "m2"}]
     assert ok1.s3_key_bronze in s3.keys()
     assert other_group.s3_key_bronze in s3.keys()
-    assert later_same_group.s3_key_bronze not in s3.keys()  # kolejność w grupie zachowana
+    assert later_same_group.s3_key_bronze not in s3.keys()  # FIFO ordering preserved within group
 
 
-def test_archiver_inny_blad_s3_jest_zglaszany(s3):
+def test_archiver_other_s3_error_is_reported(s3):
     s3.fail_with = AccessDenied()
     out = archiver.lambda_handler(sqs_event([opensky_record()]))
     assert out["batchItemFailures"] == [{"itemIdentifier": "m0"}]
 
 
-def test_archiver_odrzuca_zla_koperte(s3):
-    bad = json.dumps({"event_id": "zle:id", "source": "opensky", "event_time": NOW,
+def test_archiver_rejects_invalid_envelope(s3):
+    bad = json.dumps({"event_id": "bad:id", "source": "opensky", "event_time": NOW,
                       "ingestion_time": NOW, "location": None, "payload": {}})
     out = archiver.lambda_handler(sqs_event([opensky_record()], bodies=[bad]))
     assert out["batchItemFailures"] == [{"itemIdentifier": "m0"}]
@@ -210,7 +209,7 @@ def test_archiver_odrzuca_zla_koperte(s3):
 
 
 # ======================================================== silver_transforms
-def test_noaa_wind_aktywny_satelita_jest_czyszczony():
+def test_noaa_wind_active_satellite_is_cleaned():
     rec = make_record("noaa_swpc", "noaa_swpc:wind:DSCOVR:2026-11-20T11:55:00Z", {
         "series": "wind", "time_tag": "2026-11-20T11:55:00", "source": "DSCOVR", "active": True,
         "proton_speed": "410.5", "proton_density": None, "range": 1,
@@ -220,7 +219,7 @@ def test_noaa_wind_aktywny_satelita_jest_czyszczony():
                            "proton_speed": 410.5, "proton_density": None, "range": 1}
 
 
-def test_noaa_nieaktywny_satelita_jest_pomijany_a_brak_pola_active_nie():
+def test_noaa_inactive_satellite_skipped_while_missing_active_kept():
     base = {"series": "mag", "time_tag": "2026-11-20T11:55:00", "source": "ACE", "bt": 5.0}
     inactive = make_record("noaa_swpc", "noaa_swpc:mag:ACE:t", {**base, "active": False})
     unknown = make_record("noaa_swpc", "noaa_swpc:mag:ACE:t2", dict(base))
@@ -228,20 +227,20 @@ def test_noaa_nieaktywny_satelita_jest_pomijany_a_brak_pola_active_nie():
     assert to_silver(unknown)["data"]["satellite"] == "ACE"
 
 
-def test_noaa_kp():
+def test_noaa_kp_transform():
     rec = make_record("noaa_swpc", "noaa_swpc:kp:2026-11-20T09:00:00Z:3.33", {
         "series": "kp", "time_tag": "2026-11-20T09:00:00", "Kp": "3.33", "a_running": 15, "station_count": 8,
     })
     assert to_silver(rec)["data"] == {"series": "kp", "kp": 3.33, "a_running": 15, "station_count": 8}
 
 
-def test_opensky_nazwane_pola_callsign_i_czasy():
+def test_opensky_named_fields_callsign_and_timestamps():
     rec = opensky_record()
     original = copy.deepcopy(rec.payload)
     doc = to_silver(rec)
     d = doc["data"]
 
-    assert rec.payload == original, "silver nie może zmieniać rekordu bronze"
+    assert rec.payload == original, "silver must not mutate bronze record"
     assert d["icao24"] == "4952c7"
     assert d["callsign"] == "LOT123"
     iso = lambda ts: datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: E731
@@ -253,7 +252,7 @@ def test_opensky_nazwane_pola_callsign_i_czasy():
     assert doc["location"] == {"lat": 52.2, "lon": 21.0}
 
 
-def test_opensky_pusty_callsign_none_i_krotka_tablica():
+def test_opensky_blank_callsign_none_and_short_array():
     state = list(STATE)
     state[1] = "        "
     d = to_silver(opensky_record(state=state))["data"]
@@ -263,7 +262,7 @@ def test_opensky_pusty_callsign_none_i_krotka_tablica():
     assert short["data"]["velocity"] is None and short["data"]["snapshot_time"] is None
 
 
-def test_tomorrow_splaszczenie_i_snake_case():
+def test_tomorrow_flattening_and_snake_case():
     resp = {
         "data": {"time": "2026-11-20T11:55:00Z",
                  "values": {"temperature": 3.1, "windSpeed": 5.2, "uvIndex": 0, "temperatureApparent": 1.0}},
@@ -274,25 +273,25 @@ def test_tomorrow_splaszczenie_i_snake_case():
     assert d == {"station": "EPWA", "temperature": 3.1, "wind_speed": 5.2, "uv_index": 0, "temperature_apparent": 1.0}
 
 
-def test_nieznane_zrodlo_przechodzi_bez_zmian(monkeypatch):
-    monkeypatch.delitem(silver_transforms.TRANSFORMS, "seismic")  # źródło bez transformacji
+def test_unknown_source_passes_through_unchanged(monkeypatch):
+    monkeypatch.delitem(silver_transforms.TRANSFORMS, "seismic")  # source without dedicated transform
     rec = make_record("seismic", "seismic:20261120_0000001:2026-11-20T11:55:00Z", {"mag": 4.1, "region": "X"})
     assert to_silver(rec)["data"] == {"mag": 4.1, "region": "X"}
 
 
-def test_seismic_splaszczenie_properties_i_czasy():
+def test_seismic_flattening_properties_and_timestamps():
     rec = seismic_record()
     original = copy.deepcopy(rec.payload)
     d = to_silver(rec)["data"]
 
-    assert rec.payload == original, "silver nie może zmieniać rekordu bronze"
+    assert rec.payload == original, "silver must not mutate bronze record"
     assert d["action"] == "create"
     assert d["unid"] == "20261115_0000312" and d["mag"] == 3.2 and d["flynn_region"] == "PANAMA"
     assert d["time"] == "2026-11-15T05:08:52Z"
-    assert d["lastupdate"] == "2026-11-16T19:29:23.33162Z"  # pełna precyzja: porównujemy po niej wersje
+    assert d["lastupdate"] == "2026-11-16T19:29:23.33162Z"  # full precision preserved for version comparison
 
 
-def test_seismic_stara_koperta_jest_obslugiwana():
+def test_seismic_legacy_envelope_is_supported():
     rec = seismic_record()
     rec.payload = {"event": rec.payload}
 
@@ -302,8 +301,8 @@ def test_seismic_stara_koperta_jest_obslugiwana():
     assert d["mag"] == 3.2
 
 
-def test_seismic_silver_id_i_klucz_bez_lastupdate():
-    """Wyjątek od reguły bronze == silver: silver ma jeden obiekt na trzęsienie (unid)."""
+def test_seismic_silver_id_and_key_omit_lastupdate():
+    """Exception to bronze == silver: silver stores one object per earthquake (unid)."""
     rec = seismic_record()
     assert rec.silver_event_id == "seismic:20261115_0000312"
     assert to_silver(rec)["event_id"] == "seismic:20261115_0000312"
@@ -311,7 +310,7 @@ def test_seismic_silver_id_i_klucz_bez_lastupdate():
     assert rec.s3_key_silver != rec.s3_key_bronze.replace("bronze/", "silver/", 1)
 
 
-def test_koperta_silver():
+def test_silver_envelope_fields():
     rec = opensky_record()
     doc = to_silver(rec)
     for k in ("event_id", "source", "event_time", "ingestion_time", "location"):
@@ -319,11 +318,11 @@ def test_koperta_silver():
     assert doc["silver_version"] == silver_transforms.SILVER_VERSION
 
 
-def test_opensky_fields_zgodne_z_pollerem():
+def test_opensky_fields_match_poller():
     assert OPENSKY_FIELDS == opensky.FIELDS
 
 
-def test_klucz_silver_odpowiada_kluczowi_bronze():
+def test_silver_key_matches_bronze_key():
     rec = opensky_record()
     assert rec.s3_key_silver == rec.s3_key_bronze.replace("bronze/", "silver/", 1)
 
@@ -334,10 +333,10 @@ def put_bronze(s3, rec):
     return rec.s3_key_bronze
 
 
-def test_silver_handler_zapisuje_silver_dla_zakodowanego_klucza(s3):
+def test_silver_handler_writes_silver_for_url_encoded_key(s3):
     rec = opensky_record()
     key = put_bronze(s3, rec)
-    assert "=" in key  # w zdarzeniu S3 będzie zakodowane jako %3D
+    assert "=" in key  # URL-encoded as %3D in S3 event notifications
 
     out = silver_handler.lambda_handler(s3_event(key))
 
@@ -345,7 +344,7 @@ def test_silver_handler_zapisuje_silver_dla_zakodowanego_klucza(s3):
     assert s3.doc(rec.s3_key_silver) == to_silver(rec)
 
 
-def test_silver_handler_pomija_nieaktywnego_satelite(s3):
+def test_silver_handler_skips_inactive_satellite(s3):
     rec = make_record("noaa_swpc", "noaa_swpc:wind:ACE:2026-11-20T11:55:00Z",
                       {"series": "wind", "source": "ACE", "active": False})
     out = silver_handler.lambda_handler(s3_event(put_bronze(s3, rec)))
@@ -353,13 +352,13 @@ def test_silver_handler_pomija_nieaktywnego_satelite(s3):
     assert s3.keys("silver/") == []
 
 
-def test_silver_handler_ignoruje_obiekty_spoza_bronze_bez_czytania(s3):
+def test_silver_handler_ignores_non_bronze_objects_without_reading(s3):
     out = silver_handler.lambda_handler(s3_event("silver/source=opensky/date=2026-11-20/x.json"))
     assert out == {"written": 0, "skipped": 0, "stale": 0, "ignored": 1}
-    assert s3.reads == []  # żadnej pętli silver -> silver
+    assert s3.reads == []  # prevents silver -> silver feedback loop
 
 
-def test_silver_handler_przetwarzanie_jest_idempotentne(s3):
+def test_silver_handler_processing_is_idempotent(s3):
     rec = opensky_record()
     key = put_bronze(s3, rec)
     silver_handler.lambda_handler(s3_event(key))
@@ -369,9 +368,9 @@ def test_silver_handler_przetwarzanie_jest_idempotentne(s3):
     assert len(s3.keys("silver/")) == 1
 
 
-def test_silver_handler_uszkodzony_bronze_rzuca_wyjatek(s3):
+def test_silver_handler_corrupt_bronze_raises_exception(s3):
     key = "bronze/source=opensky/date=2026-11-20/opensky_bad_1.json"
-    s3.objects[(BUCKET, key)] = b"{nie json"
+    s3.objects[(BUCKET, key)] = b"{not json"
     with pytest.raises(Exception):
         silver_handler.lambda_handler(s3_event(key))
 
@@ -383,33 +382,33 @@ def seismic_version(lastupdate, mag):
     return seismic_record(msg)
 
 
-def test_silver_seismic_najnowsza_wersja_wygrywa_niezaleznie_od_kolejnosci(s3):
+def test_silver_seismic_latest_version_wins_regardless_of_order(s3):
     old = seismic_version("2026-11-16T19:29:23.1Z", 3.2)
-    new = seismic_version("2026-11-16T19:29:23.9Z", 3.4)  # ta sama sekunda: liczy się ułamek
+    new = seismic_version("2026-11-16T19:29:23.9Z", 3.4)  # same second: sub-second precision matters
 
     assert silver_handler.lambda_handler(s3_event(put_bronze(s3, new)))["written"] == 1
     assert silver_handler.lambda_handler(s3_event(put_bronze(s3, old)))["stale"] == 1
 
     assert s3.keys("silver/") == [new.s3_key_silver]
     assert s3.doc(new.s3_key_silver)["data"]["mag"] == 3.4
-    assert len(s3.keys("bronze/")) == 2  # bronze trzyma obie wersje
+    assert len(s3.keys("bronze/")) == 2  # bronze retains both versions
 
 
-def test_silver_seismic_replay_tej_samej_wersji_nadpisuje(s3):
+def test_silver_seismic_replay_of_same_version_overwrites(s3):
     rec = seismic_record()
     key = put_bronze(s3, rec)
     silver_handler.lambda_handler(s3_event(key))
     assert silver_handler.lambda_handler(s3_event(key))["written"] == 1
 
 
-def test_silver_seismic_rownolegly_zapis_nowszej_wersji_nie_jest_nadpisany(s3, monkeypatch):
+def test_silver_seismic_concurrent_write_does_not_overwrite_newer_version(s3, monkeypatch):
     old = seismic_version("2026-11-16T19:00:00Z", 3.2)
     new = seismic_version("2026-11-16T20:00:00Z", 3.4)
     put_bronze(s3, old)
     put_bronze(s3, new)
     silver_handler.lambda_handler(s3_event(old.s3_key_bronze))
 
-    # Lambda A (stara wersja) przeczytała silver, zanim Lambda B zapisała nową
+    # Lambda A (old version) reads silver before Lambda B writes the newer version
     real_get = s3.get_object
     calls = {"n": 0}
 
@@ -417,7 +416,7 @@ def test_silver_seismic_rownolegly_zapis_nowszej_wersji_nie_jest_nadpisany(s3, m
         resp = real_get(Bucket, Key)
         if Key == old.s3_key_silver and calls["n"] == 0:
             calls["n"] += 1
-            silver_handler.process_object(BUCKET, new.s3_key_bronze)  # B wygrywa wyścig
+            silver_handler.process_object(BUCKET, new.s3_key_bronze)  # Lambda B wins the race
         return resp
 
     monkeypatch.setattr(s3, "get_object", get_then_race)
@@ -425,8 +424,8 @@ def test_silver_seismic_rownolegly_zapis_nowszej_wersji_nie_jest_nadpisany(s3, m
     assert s3.doc(new.s3_key_silver)["data"]["mag"] == 3.4
 
 
-# ========================================= end-to-end: pollery -> bronze -> silver
-def test_przeplyw_pollery_archiver_silver(s3):
+# ========================================= end-to-end: pollers -> bronze -> silver
+def test_end_to_end_pollers_archiver_silver_flow(s3):
     wind_rows = [
         {"time_tag": "2026-11-20T11:57:00", "source": "ACE", "active": False, "proton_speed": None},
         {"time_tag": "2026-11-20T11:57:00", "source": "DSCOVR", "active": True, "proton_speed": 410.5},
@@ -441,27 +440,27 @@ def test_przeplyw_pollery_archiver_silver(s3):
     update = copy.deepcopy(SEISMIC_MSG)
     update["action"] = "update"
     update["data"]["properties"].update(mag=3.4, lastupdate="2026-11-16T20:00:00.5Z")
-    quakes = [seismic_record(), seismic_record(update)]  # dwie wersje tego samego trzęsienia
+    quakes = [seismic_record(), seismic_record(update)]  # two revisions of the same earthquake
     records = noaa + flights + weather + quakes
 
-    # 1) SQS -> archiver -> bronze (wszystko, także nieaktywny satelita i surowe tablice)
+    # 1) SQS -> archiver -> bronze (everything, including inactive satellite and raw arrays)
     assert archiver.lambda_handler(sqs_event(records)) == {"batchItemFailures": []}
     bronze = s3.keys("bronze/")
     assert len(bronze) == len(records) == 8
     for rec in records:
-        assert Record.from_json(s3.objects[(BUCKET, rec.s3_key_bronze)]) == rec  # payload identyczny z pollerem
+        assert Record.from_json(s3.objects[(BUCKET, rec.s3_key_bronze)]) == rec  # payload identical to poller
 
-    # 2) zdarzenia S3 -> silver
+    # 2) S3 events -> silver
     totals = {"written": 0, "skipped": 0, "stale": 0, "ignored": 0}
     for key in bronze:
         for k, v in silver_handler.lambda_handler(s3_event(key)).items():
             totals[k] += v
-    assert totals == {"written": 7, "skipped": 1, "stale": 0, "ignored": 0}  # pominięty tylko nieaktywny satelita ACE
+    assert totals == {"written": 7, "skipped": 1, "stale": 0, "ignored": 0}  # only inactive ACE satellite skipped
 
     silver = s3.keys("silver/")
-    assert len(silver) == 6  # dwie wersje trzęsienia => jeden obiekt silver
+    assert len(silver) == 6  # two seismic revisions => single silver object
     quake = s3.doc(quakes[1].s3_key_silver)
     assert quake["data"]["mag"] == 3.4 and quake["data"]["action"] == "update"
-    # silver nie wywołał kolejnych zdarzeń: bronze nietknięte
+    # silver triggered no extra writes to bronze: bronze remains untouched
     assert s3.keys("bronze/") == bronze
     assert {s3.doc(k)["source"] for k in silver} == {"noaa_swpc", "opensky", "tomorrow_io", "seismic"}

@@ -1,30 +1,30 @@
-"""Testy pollerów pod założenia bronze.
+"""Unit tests for ingestion pollers under Bronze layer requirements.
 
-Sprawdzają, że:
-- payload to dane źródła bez zmian (nic nie jest czyszczone, nazywane ani obcinane),
-- koperta jest zgodna z common/schema.py (Record przechodzi walidację),
-- parsery nie mutują wejścia,
-- lambda_handler przekazuje do publish() właśnie takie rekordy.
+Verifies that:
+- `payload` contains raw source data unchanged (no cleaning, renaming, or trimming),
+- envelope complies with `common/schema.py` (`Record` passes validation),
+- parsers do not mutate their input,
+- `lambda_handler` passes those exact records to `publish()`.
 
-Uruchomienie: pytest -q test_pollers_bronze.py
-Dopasuj importy modułów poniżej do struktury repo (np. `from src.pollers import noaa_swpc`).
-Testy nie wołają prawdziwych API ani AWS: fetch i publish są podmieniane.
+Run: pytest -q tests/test_pollers_bronze.py
+Tests do not call live external APIs or AWS: `fetch` and `publish` are mocked.
 """
 import copy
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
 from common.schema import Record
-
 from ingestion import noaa_swpc, opensky, tomorrow_io
+from seismic_ws import main as seismic_ws
 
 NOW = "2026-11-20T12:00:00Z"
 
 
 def _iso(dt: datetime) -> str:
-    return dt.strftime("%Y-%m-%dT%H:%M:%S")  # jak time_tag NOAA: bez 'Z'
+    return dt.strftime("%Y-%m-%dT%H:%M:%S")  # matches NOAA time_tag format without 'Z'
 
 
 class FakeResp:
@@ -42,34 +42,34 @@ class FakeResp:
 
 
 # ------------------------------------------------------------------ NOAA SWPC
-def test_noaa_rtsw_payload_bez_zmian_i_bez_wyboru_satelity():
+def test_noaa_rtsw_payload_unchanged_without_satellite_filtering():
     rows = [
-        {"time_tag": "2026-11-20T11:40:00", "source": "ACE", "active": True, "speed": 400.0},  # za stary
-        {"time_tag": "2026-11-20T11:57:00", "source": "ACE", "active": False, "speed": None},  # nieaktywny + null
+        {"time_tag": "2026-11-20T11:40:00", "source": "ACE", "active": True, "speed": 400.0},  # too old
+        {"time_tag": "2026-11-20T11:57:00", "source": "ACE", "active": False, "speed": None},  # inactive + null
         {"time_tag": "2026-11-20T11:57:00", "source": "DSCOVR", "active": True, "speed": 410.5},
         {"time_tag": "2026-11-20T11:59:00", "source": "DSCOVR", "active": True, "speed": 411.0},
-        {"source": "ACE"},  # bez time_tag: nie da się zbudować event_id
+        {"source": "ACE"},  # missing time_tag: cannot build event_id
     ]
     original = copy.deepcopy(rows)
 
     recs = noaa_swpc.parse_rtsw(rows, "wind", NOW, since="2026-11-20T11:54:00Z")
 
-    assert rows == original, "parser zmodyfikował wejście"
+    assert rows == original, "parser mutated input"
     assert len(recs) == 3
     for r in recs:
         assert isinstance(r, Record)
         assert r.payload["series"] == "wind"
         assert {k: v for k, v in r.payload.items() if k != "series"} in original
-    # nieaktywny satelita i null zostają (czyszczenie to silver)
+    # inactive satellite and null values are preserved (cleaning happens in Silver)
     assert any(r.payload["active"] is False and r.payload["speed"] is None for r in recs)
-    # ten sam time_tag, różni satelici => różne id, klucze S3 i dedup id
+    # same time_tag across different satellites => distinct event_id, S3 keys, and deduplication_id
     assert len({r.event_id for r in recs}) == 3
     assert len({r.s3_key_bronze for r in recs}) == 3
     assert len({r.deduplication_id for r in recs}) == 3
     assert Record.from_json(recs[0].to_json()) == recs[0]
 
 
-def test_noaa_kp_tylko_najnowszy_wiersz_i_korekta_to_nowy_rekord():
+def test_noaa_kp_takes_latest_row_and_correction_creates_new_record():
     rows = [
         {"time_tag": "2026-11-20T03:00:00", "Kp": 2.0, "a_running": 7, "station_count": 8},
         {"time_tag": "2026-11-20T09:00:00", "Kp": 3.33, "a_running": 15, "station_count": 8},
@@ -84,7 +84,7 @@ def test_noaa_kp_tylko_najnowszy_wiersz_i_korekta_to_nowy_rekord():
     assert noaa_swpc.parse_kp([], NOW) == []
 
 
-def test_noaa_handler_wysyla_surowe_wiersze_z_okna(monkeypatch):
+def test_noaa_handler_sends_raw_rows_in_window(monkeypatch):
     now = datetime.now(timezone.utc)
     fresh = _iso(now - timedelta(minutes=1))
     old = _iso(now - timedelta(minutes=noaa_swpc.WINDOW_MIN + 30))
@@ -104,12 +104,12 @@ def test_noaa_handler_wysyla_surowe_wiersze_z_okna(monkeypatch):
 
     out = noaa_swpc.lambda_handler()
 
-    assert out == {"sent": 4, "errors": []}  # 2 wind + 1 mag + 1 kp; stary wiersz odpadł
+    assert out == {"sent": 4, "errors": []}  # 2 wind + 1 mag + 1 kp; old row excluded
     assert sorted(r.payload["series"] for r in sent) == ["kp", "mag", "wind", "wind"]
     assert all(r.location is None for r in sent)
 
 
-def test_noaa_handler_jedno_zrodlo_pada_reszta_leci(monkeypatch):
+def test_noaa_handler_isolates_single_source_failure(monkeypatch):
     now = datetime.now(timezone.utc)
     fresh = _iso(now - timedelta(minutes=1))
 
@@ -140,17 +140,17 @@ STATE_NO_POS = [
 STATE_NO_ID = [None, "X", "Poland", None, 1794824000] + [None] * 13
 
 
-def test_opensky_payload_to_surowa_tablica():
+def test_opensky_payload_is_raw_state_array():
     body = {"time": 1794824060, "states": [STATE_OK, STATE_NO_POS, STATE_NO_ID]}
     original = copy.deepcopy(body)
 
     recs = opensky.parse(body, NOW)
 
-    assert body == original, "parser zmodyfikował wejście"
-    assert len(recs) == 2  # stan bez icao24 pominięty
+    assert body == original, "parser mutated input"
+    assert len(recs) == 2  # state without icao24 skipped
     first, second = recs
     assert first.payload == {"state": STATE_OK, "snapshot_time": 1794824060}
-    assert first.payload["state"][1] == "LOT123  ", "callsign nie może być obcięty"
+    assert first.payload["state"][1] == "LOT123  ", "callsign must not be trimmed in Bronze"
     assert first.event_id == "opensky:4952c7:1794824057"
     expected_time = datetime.fromtimestamp(1794824057, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     assert first.event_time == expected_time
@@ -158,7 +158,7 @@ def test_opensky_payload_to_surowa_tablica():
     assert second.location is None and second.payload["state"] == STATE_NO_POS
 
 
-def test_opensky_last_contact_null_uzywa_czasu_migawki():
+def test_opensky_null_last_contact_falls_back_to_snapshot_time():
     state = list(STATE_OK)
     state[4] = None
     recs = opensky.parse({"time": 1794824060, "states": [state]}, NOW)
@@ -166,16 +166,16 @@ def test_opensky_last_contact_null_uzywa_czasu_migawki():
     assert recs[0].payload["state"] == state
 
 
-def test_opensky_pusta_odpowiedz():
+def test_opensky_empty_response():
     assert opensky.parse({"time": 1, "states": None}, NOW) == []
     assert opensky.parse({"time": 1}, NOW) == []
 
 
-def test_opensky_fields_ma_18_pol():
+def test_opensky_fields_has_18_entries():
     assert len(opensky.FIELDS) == 18
 
 
-def test_opensky_handler_zlicza_pominiete(monkeypatch):
+def test_opensky_handler_counts_skipped_states(monkeypatch):
     body = {"time": 1794824060, "states": [STATE_OK, STATE_NO_POS, STATE_NO_ID]}
     monkeypatch.setattr(opensky, "fetch", lambda: FakeResp(body))
     sent = []
@@ -187,13 +187,13 @@ def test_opensky_handler_zlicza_pominiete(monkeypatch):
     assert sent[0].payload["state"] == STATE_OK
 
 
-def test_opensky_handler_429_nie_wysyla(monkeypatch):
+def test_opensky_handler_429_does_not_publish(monkeypatch):
     monkeypatch.setattr(
         opensky, "fetch", lambda: FakeResp({}, status=429, headers={"X-Rate-Limit-Retry-After-Seconds": "60"})
     )
 
     def no_publish(recs):
-        raise AssertionError("publish nie powinien być wołany przy 429")
+        raise AssertionError("publish must not be called on HTTP 429")
 
     monkeypatch.setattr(opensky, "publish", no_publish)
 
@@ -212,13 +212,13 @@ def _tomorrow_body(lat=52.166, lon=20.967):
     }
 
 
-def test_tomorrow_payload_to_cala_odpowiedz():
+def test_tomorrow_payload_contains_full_response():
     body = _tomorrow_body()
     original = copy.deepcopy(body)
 
     rec = tomorrow_io.parse(body, "EPWA", NOW)
 
-    assert body == original, "parser zmodyfikował wejście"
+    assert body == original, "parser mutated input"
     assert rec.payload == {"station": "EPWA", "response": original}
     assert rec.event_id == "tomorrow_io:EPWA:2026-11-20T11:55:00Z"
     assert rec.event_time == "2026-11-20T11:55:00Z"
@@ -228,7 +228,7 @@ def test_tomorrow_payload_to_cala_odpowiedz():
     )
 
 
-def test_tomorrow_handler_jedno_lotnisko_429_reszta_leci(monkeypatch):
+def test_tomorrow_handler_isolates_single_airport_429(monkeypatch):
     monkeypatch.setattr(tomorrow_io, "PAUSE_S", 0)
     monkeypatch.setattr(tomorrow_io, "tomorrow_api_keys", lambda: ["k1", "k2"])
     epkk_lat = tomorrow_io.LOCATIONS["EPKK"][0]
@@ -251,7 +251,7 @@ def test_tomorrow_handler_jedno_lotnisko_429_reszta_leci(monkeypatch):
     assert all("response" in r.payload and "values" not in r.payload for r in sent)
 
 
-def test_tomorrow_handler_wszystko_pada_rzuca_wyjatek(monkeypatch):
+def test_tomorrow_handler_raises_when_all_airports_fail(monkeypatch):
     monkeypatch.setattr(tomorrow_io, "PAUSE_S", 0)
     monkeypatch.setattr(tomorrow_io, "tomorrow_api_keys", lambda: ["k1"])
     monkeypatch.setattr(tomorrow_io, "fetch", lambda lat, lon, key: FakeResp({}, status=500))
@@ -260,27 +260,23 @@ def test_tomorrow_handler_wszystko_pada_rzuca_wyjatek(monkeypatch):
         tomorrow_io.lambda_handler()
 
 
-# ------------------------------------------------------------------ seismic (websocket EMSC)
-from pathlib import Path  # noqa: E402
-
-from seismic_ws import main as seismic_ws  # noqa: E402
-
+# ------------------------------------------------------------------ seismic (EMSC WebSocket)
 SEISMIC_MSG = json.loads((Path(__file__).parent / "seismic_sample.json").read_text())
 
 
-def test_seismic_payload_to_cala_wiadomosc_i_koperta():
+def test_seismic_payload_contains_full_message_and_envelope():
     msg = copy.deepcopy(SEISMIC_MSG)
     rec = seismic_ws.parse(msg, NOW)
 
-    assert msg == SEISMIC_MSG, "parser nie może mutować wejścia"
+    assert msg == SEISMIC_MSG, "parser must not mutate input"
     assert rec.payload == SEISMIC_MSG
     assert rec.event_id == "seismic:20261115_0000312:2026-11-16T19:29:23.33162Z"
     assert rec.event_time == "2026-11-15T05:08:52Z"
-    assert rec.location == {"lat": 7.5292, "lon": -80.4598, "depth": 15.0}  # depth dodatnia (km)
+    assert rec.location == {"lat": 7.5292, "lon": -80.4598, "depth": 15.0}  # positive depth (km)
     assert Record.from_json(rec.to_json()) == rec
 
 
-def test_seismic_aktualizacja_to_nowy_rekord_a_powtorka_ten_sam():
+def test_seismic_update_creates_new_record_while_duplicate_matches():
     update = copy.deepcopy(SEISMIC_MSG)
     update["action"] = "update"
     update["data"]["properties"]["lastupdate"] = "2026-11-16T20:00:00Z"
@@ -294,6 +290,6 @@ def test_seismic_aktualizacja_to_nowy_rekord_a_powtorka_ten_sam():
     assert updated.s3_key_bronze != first.s3_key_bronze
 
 
-def test_seismic_wiadomosc_bez_koperty_rzuca():
+def test_seismic_message_missing_envelope_fields_raises():
     with pytest.raises(KeyError):
         seismic_ws.parse({"action": "create", "data": {"properties": {"unid": "x"}}}, NOW)
