@@ -8,6 +8,7 @@ set -euo pipefail
 source "$(dirname "$0")/../.venv/bin/activate"
 
 export AWS_REGION="${AWS_REGION:-eu-north-1}"
+export TOPIC_ARN="${TOPIC_ARN:-arn:aws:sns:eu-north-1:592964949672:flight-disruption-events.fifo}"
 export QUEUE_URL="${QUEUE_URL:-https://sqs.eu-north-1.amazonaws.com/592964949672/flight-disruption-events.fifo}"
 export OPENSKY_SECRET_ARN="${OPENSKY_SECRET_ARN:-flight-disruption/opensky}"  # nazwa sekretu też działa
 
