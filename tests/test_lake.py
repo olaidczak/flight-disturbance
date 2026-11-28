@@ -1,4 +1,4 @@
-"""Unit tests for Data Lake layers: archiver (Bronze), silver_transforms, silver_handler,
+"""Unit tests for Data Lake layers: archiver (raw/ JSONL), silver_transforms, silver_handler,
 and end-to-end flow: pollers -> archiver -> silver (using an in-memory FakeS3 stub).
 
 Run from repository root:
@@ -11,6 +11,7 @@ import hashlib
 import importlib
 import io
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote_plus
@@ -144,39 +145,46 @@ def opensky_record(state=None, snapshot=1794824060):
     return opensky.parse(body, NOW)[0]
 
 
-# =========================================================== archiver (bronze)
-def test_archiver_writes_record_unchanged_under_bronze_key(s3):
-    rec = opensky_record()
-    out = archiver.lambda_handler(sqs_event([rec]))
+# =========================================================== archiver (raw/ JSONL)
+RAW_KEY = re.compile(r"raw/ingest_date=\d{4}-\d{2}-\d{2}/source=(?P<source>[a-z_]+)/[0-9a-f]{32}\.jsonl")
+
+
+def raw_lines(s3, key):
+    return [json.loads(line) for line in s3.objects[(BUCKET, key)].decode().split("\n")]
+
+
+def test_archiver_groups_records_per_source_into_jsonl_batches(s3):
+    a, b = opensky_record(), opensky_record(state=["abc123"] + STATE[1:])
+    kp = noaa_swpc.parse_kp([{"time_tag": "2026-11-20T09:00:00", "Kp": 3.0}], NOW)[0]
+    out = archiver.lambda_handler(sqs_event([a, b, kp]))
 
     assert out == {"batchItemFailures": []}
-    assert s3.keys() == [rec.s3_key_bronze]
-    assert s3.keys()[0].startswith("bronze/source=opensky/date=")
-    stored = Record.from_json(s3.objects[(BUCKET, rec.s3_key_bronze)])
-    assert stored == rec
-    assert stored.payload["state"][1] == "LOT123  "  # callsign untouched
+    keys = s3.keys("raw/")
+    assert len(keys) == 2  # one file per source, not per record
+    by_source = {RAW_KEY.fullmatch(k).group("source"): k for k in keys}
+    assert set(by_source) == {"opensky", "noaa_swpc"}
+    stored = [Record.from_json(json.dumps(d)) for d in raw_lines(s3, by_source["opensky"])]
+    assert sorted(r.event_id for r in stored) == sorted([a.event_id, b.event_id])
+    assert a in stored and b in stored  # records stored unchanged
+    assert next(r for r in stored if r == a).payload["state"][1] == "LOT123  "  # callsign untouched
+    assert Record.from_json(json.dumps(raw_lines(s3, by_source["noaa_swpc"])[0])) == kp
+    assert not s3.keys("bronze/")
 
 
-def test_archiver_duplicate_first_write_wins(s3):
-    first = opensky_record()
-    second = dataclasses.replace(first, ingestion_time="2026-11-20T12:05:00Z")
+def test_archiver_same_batch_gives_same_key_and_content(s3):
+    a, b = opensky_record(), opensky_record(state=["abc123"] + STATE[1:])
+    archiver.lambda_handler(sqs_event([a, b]))
+    first = {k: s3.objects[(BUCKET, k)] for k in s3.keys("raw/")}
+    archiver.lambda_handler(sqs_event([b, a]))  # redelivery in a different order
 
-    assert archiver.lambda_handler(sqs_event([first])) == {"batchItemFailures": []}
-    assert archiver.lambda_handler(sqs_event([second])) == {"batchItemFailures": []}  # 412 = success
-
-    assert len(s3.keys()) == 1
-    assert s3.doc(first.s3_key_bronze)["ingestion_time"] == NOW  # preserves first ingestion_time
+    assert len(s3.keys("raw/")) == 1
+    assert {k: s3.objects[(BUCKET, k)] for k in s3.keys("raw/")} == first
 
 
-def test_archiver_write_once_disabled_overwrites(s3, monkeypatch):
-    monkeypatch.setenv("BRONZE_WRITE_ONCE", "false")
-    first = opensky_record()
-    second = dataclasses.replace(first, ingestion_time="2026-11-20T12:05:00Z")
-
-    archiver.lambda_handler(sqs_event([first]))
-    archiver.lambda_handler(sqs_event([second]))
-
-    assert s3.doc(first.s3_key_bronze)["ingestion_time"] == "2026-11-20T12:05:00Z"
+def test_archiver_different_batch_gives_different_key(s3):
+    archiver.lambda_handler(sqs_event([opensky_record()]))
+    archiver.lambda_handler(sqs_event([opensky_record(state=["abc123"] + STATE[1:])]))
+    assert len(s3.keys("raw/")) == 2
 
 
 def test_archiver_message_error_blocks_same_group_only(s3):
@@ -189,15 +197,15 @@ def test_archiver_message_error_blocks_same_group_only(s3):
     out = archiver.lambda_handler(event)
 
     assert out["batchItemFailures"] == [{"itemIdentifier": "m1"}, {"itemIdentifier": "m2"}]
-    assert ok1.s3_key_bronze in s3.keys()
-    assert other_group.s3_key_bronze in s3.keys()
-    assert later_same_group.s3_key_bronze not in s3.keys()  # FIFO ordering preserved within group
+    written = [d["event_id"] for k in s3.keys("raw/") for d in raw_lines(s3, k)]
+    assert sorted(written) == sorted([ok1.event_id, other_group.event_id])
+    assert later_same_group.event_id not in written  # FIFO ordering preserved within group
 
 
-def test_archiver_other_s3_error_is_reported(s3):
+def test_archiver_s3_error_is_raised_so_the_batch_is_retried(s3):
     s3.fail_with = AccessDenied()
-    out = archiver.lambda_handler(sqs_event([opensky_record()]))
-    assert out["batchItemFailures"] == [{"itemIdentifier": "m0"}]
+    with pytest.raises(AccessDenied):
+        archiver.lambda_handler(sqs_event([opensky_record()]))
 
 
 def test_archiver_rejects_invalid_envelope(s3):
@@ -424,8 +432,12 @@ def test_silver_seismic_concurrent_write_does_not_overwrite_newer_version(s3, mo
     assert s3.doc(new.s3_key_silver)["data"]["mag"] == 3.4
 
 
-# ========================================= end-to-end: pollers -> bronze -> silver
-def test_end_to_end_pollers_archiver_silver_flow(s3):
+# ===================== end-to-end: pollers -> raw/ (archiver) -> bronze/silver (job code)
+def test_end_to_end_pollers_archiver_job_flow(s3):
+    from types import SimpleNamespace
+
+    from processing import batch_rows
+
     wind_rows = [
         {"time_tag": "2026-11-20T11:57:00", "source": "ACE", "active": False, "proton_speed": None},
         {"time_tag": "2026-11-20T11:57:00", "source": "DSCOVR", "active": True, "proton_speed": 410.5},
@@ -440,27 +452,25 @@ def test_end_to_end_pollers_archiver_silver_flow(s3):
     update = copy.deepcopy(SEISMIC_MSG)
     update["action"] = "update"
     update["data"]["properties"].update(mag=3.4, lastupdate="2026-11-16T20:00:00.5Z")
-    quakes = [seismic_record(), seismic_record(update)]  # two revisions of the same earthquake
+    quakes = [seismic_record(), seismic_record(update)]  # two versions of the same earthquake
     records = noaa + flights + weather + quakes
 
-    # 1) SQS -> archiver -> bronze (everything, including inactive satellite and raw arrays)
+    # 1) SQS -> archiver -> raw/ (everything, incl. the inactive satellite and raw state arrays)
     assert archiver.lambda_handler(sqs_event(records)) == {"batchItemFailures": []}
-    bronze = s3.keys("bronze/")
-    assert len(bronze) == len(records) == 8
+    keys = s3.keys("raw/")
+    assert len(keys) == 4  # one file per source
+    lines = [line for k in keys for line in s3.objects[(BUCKET, k)].decode().split("\n")]
+    assert len(lines) == len(records) == 8
+
+    # 2) job code: parse -> bronze rows (payload identical to the poller's) -> silver documents
+    rows = [SimpleNamespace(**dict(zip(batch_rows.COLS, batch_rows.parse(line))), ingest_date="2026-11-20")
+            for line in lines]
+    by_id = {r.event_id: r for r in rows}
     for rec in records:
-        assert Record.from_json(s3.objects[(BUCKET, rec.s3_key_bronze)]) == rec  # payload identical to poller
-
-    # 2) S3 events -> silver
-    totals = {"written": 0, "skipped": 0, "stale": 0, "ignored": 0}
-    for key in bronze:
-        for k, v in silver_handler.lambda_handler(s3_event(key)).items():
-            totals[k] += v
-    assert totals == {"written": 7, "skipped": 1, "stale": 0, "ignored": 0}  # only inactive ACE satellite skipped
-
-    silver = s3.keys("silver/")
-    assert len(silver) == 6  # two seismic revisions => single silver object
-    quake = s3.doc(quakes[1].s3_key_silver)
-    assert quake["data"]["mag"] == 3.4 and quake["data"]["action"] == "update"
-    # silver triggered no extra writes to bronze: bronze remains untouched
-    assert s3.keys("bronze/") == bronze
-    assert {s3.doc(k)["source"] for k in silver} == {"noaa_swpc", "opensky", "tomorrow_io", "seismic"}
+        assert json.loads(by_id[rec.event_id].payload) == rec.payload
+    docs = [d for d in (batch_rows.to_doc(r) for r in rows) if d is not None]
+    assert len(docs) == 7  # only the inactive ACE satellite is dropped
+    parsed = [json.loads(d) for d in docs]
+    assert {d["source"] for d in parsed} == {"noaa_swpc", "opensky", "tomorrow_io", "seismic"}
+    assert all(d["ingest_date"] == "2026-11-20" for d in parsed)
+    assert {d["event_id"] for d in parsed if d["source"] == "seismic"} == {quakes[0].silver_event_id}  # one quake
