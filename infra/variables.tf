@@ -20,9 +20,11 @@ variable "log_retention_days" {
 
 # Które pollery mają działać wg harmonogramu. Reszta dostaje schedule w stanie DISABLED.
 # Dopisuj kolejne, gdy kod danego pollera jest gotowy i sekret ma wartość.
+# opensky celowo wyłączony: dane OpenSky publikuje poller na Raspberry Pi (przez SNS),
+# a chmurowy EventBridge Scheduler zużywałby tylko kredyty API (4000/dzień).
 variable "enabled_pollers" {
   type    = list(string)
-  default = ["noaa_swpc", "tomorrow_io", "opensky"]
+  default = ["noaa_swpc", "tomorrow_io"]
 }
 
 # Tag obrazu seismic_ws w ECR, który uruchamia serwis

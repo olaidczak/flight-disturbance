@@ -24,7 +24,7 @@ locals {
   silver_transform_name = "${var.project}-silver-transform"
   layers_source_dir     = "${path.module}/../src"
   layers_log_retention  = 14
-  layers_excluded_dirs  = ["ingestion", "dashboard", "ml", "query_service", "seismic_ws", "__pycache__"]
+  layers_excluded_dirs  = ["ingestion", "dashboard", "ml", "query_service", "seismic_ws", "batch", "__pycache__"]
 }
 
 data "archive_file" "datalake_layers" {
@@ -44,7 +44,7 @@ data "aws_iam_policy_document" "datalake_lambda_assume" {
   }
 }
 
-# ------------------------------------------------------------ bronze_archiver (SQS -> bronze/)
+# ------------------------------------------------------------ bronze_archiver (SQS -> raw/, paczki JSONL)
 resource "aws_iam_role" "bronze_archiver" {
   name               = "${local.bronze_archiver_name}-role"
   assume_role_policy = data.aws_iam_policy_document.datalake_lambda_assume.json
@@ -62,9 +62,9 @@ data "aws_iam_policy_document" "bronze_archiver" {
     resources = [aws_sqs_queue.events.arn, aws_sqs_queue.archive_events.arn]
   }
   statement {
-    sid       = "WriteBronze"
+    sid       = "WriteRaw"
     actions   = ["s3:PutObject"]
-    resources = ["${aws_s3_bucket.datalake.arn}/bronze/*"]
+    resources = ["${aws_s3_bucket.datalake.arn}/raw/*"] # paczki JSONL; lake/ zapisuje job Glue (glue_batch.tf)
   }
 }
 
@@ -91,8 +91,7 @@ resource "aws_lambda_function" "bronze_archiver" {
 
   environment {
     variables = {
-      LAKE_BUCKET       = aws_s3_bucket.datalake.bucket
-      BRONZE_WRITE_ONCE = "true"
+      LAKE_BUCKET = aws_s3_bucket.datalake.bucket
     }
   }
 
